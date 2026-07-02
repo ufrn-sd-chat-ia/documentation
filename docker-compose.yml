@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: boletim-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-boletim}
+      POSTGRES_USER: ${POSTGRES_USER:-boletim}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-boletim}
+    ports:
+      # 5432 já está ocupado pelo Postgres nativo do host (systemd) nesta
+      # máquina de desenvolvimento — expõe em 5433 para evitar conflito.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-boletim}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    container_name: boletim-zipkin
+    restart: unless-stopped
+    ports:
+      - "9411:9411"
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: boletim-prometheus
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: boletim-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  grafana-data:
