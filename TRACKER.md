@@ -40,20 +40,20 @@ O que **ainda não existe** no projeto (Fases 2 em diante):
   - Microserviços containerizados ficou **fora** do escopo desta fase (opcional, mencionado no TRACKER original) — os serviços Java continuam rodando via `mvn spring-boot:run` no host por enquanto.
 - [x] Padronizar variáveis de ambiente dos backing services via Config Server: `ms2-ai-powered.yml` já usava `${OPENAI_API_KEY:...}`; adicionado o mesmo padrão em `ms1-coordenador.yml` (`POSTGRES_URL`/`POSTGRES_USER`/`POSTGRES_PASSWORD`, com defaults apontando pro compose local). As propriedades `spring.datasource.*`/`spring.jpa.*` ficam inertes até a Fase 2 adicionar `spring-boot-starter-data-jpa` + driver ao pom do MS1 — preparar a convenção agora evita retrabalho.
 
-## Fase 2 — Domínio Acadêmico no MS1 (rebrand leve + persistência)
+## Fase 2 — Domínio Acadêmico no MS1 (rebrand leve + persistência) ✅
 
-- [ ] Modelar entidades `Aluno` e `Nota` (JPA) no `ms1-coordenador`.
-- [ ] Adicionar PostgreSQL via Spring Data JPA (driver + `spring.datasource.*` no `chat-configs/ms1-coordenador.yml`).
-- [ ] Criar `AlunoController` / `NotaController` REST (CRUD: cadastrar aluno, lançar nota, listar/consultar).
-- [ ] Substituir `ChatController` (endpoint de teste) pela lógica real de orquestração.
-- [ ] Endpoint de pergunta em linguagem natural (`/ms1/perguntar` ou similar) que delega para o MS2.
+- [x] Modelar entidades `Aluno` e `Nota` (JPA) no `ms1-coordenador`.
+- [x] Adicionar PostgreSQL via Spring Data JPA (driver `postgresql:42.7.3` + `spring.datasource.*`, já preparado desde a Fase 1).
+- [x] Criar `AlunoController` / `NotaController` REST (CRUD: cadastrar aluno, lançar nota, listar/consultar). Validação na borda: matrícula duplicada (409), aluno/nota inexistente (404), campos obrigatórios (400).
+- [x] Substituir `ChatController` (endpoint de teste) pela lógica real de orquestração.
+- [ ] ~~Endpoint de pergunta em linguagem natural que delega para o MS2~~ — adiado pra Fase 4 de propósito: a integração real é via GraphQL (ainda não existe), então criar uma versão REST provisória aqui seria trabalho jogado fora.
 
-## Fase 3 — MS3 Serverless (crit. 2)
+## Fase 3 — MS3 Serverless (crit. 2) ✅
 
-- [ ] Criar repositório/módulo `ms3-serverless` com Spring Cloud Function.
-- [ ] Implementar `Function<NotaInput, NotaResultado>` **validarNota**: valida range 0–10, calcula situação (aprovado/reprovado/recuperação) e frequência mínima. Função pura, sem estado — ideal para demonstrar o conceito de FaaS.
-- [ ] Expor via `spring-cloud-function-web` (HTTP) para ser chamada pelo MS1.
-- [ ] Integrar a chamada no fluxo de "lançar nota" do MS1 (com Circuit Breaker — ver Fase 5).
+- [x] Criado módulo `ms3-serverless` (ainda sem repositório Git próprio — decisão pendente, ver nota abaixo) com Spring Cloud Function.
+- [x] Implementado `Function<NotaInput, NotaResultado>` **validarNota**: valida faixa 0–10, frequência mínima (75%) e calcula situação (APROVADO/RECUPERACAO/REPROVADO/REPROVADO_POR_FALTA/NOTA_INVALIDA). Função pura e sem estado. Limiares (`frequencia-minima`, `media-aprovacao`, `media-recuperacao`) vêm de `@ConfigurationProperties` alimentadas pelo `chat-configs/ms3-serverless.yml` — já prontos pra virar `@RefreshScope` na Fase 7.
+- [x] Exposto via `spring-cloud-function-web` em `POST /validarNota` (exigiu adicionar `spring-boot-starter-web` também — `spring-cloud-function-web` sozinho não traz servidor HTTP embutido).
+- [x] Integrado ao fluxo de "lançar nota" do MS1: `NotaService` chama o MS3 via `RestClient` `@LoadBalanced` (Eureka) a cada nota lançada. Sem o MS3, a nota ainda é salva com `situacao: PENDENTE_VALIDACAO` (paraquedas manual via try/catch — o Circuit Breaker de verdade é da Fase 5).
 
 ## Fase 4 — GraphQL entre MS1 e MS2 (crit. 2)
 
