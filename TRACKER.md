@@ -63,15 +63,16 @@ O que **ainda não existe** no projeto (Fases 2 em diante):
 - [x] Tool `consultarNota` → `consultarNotas`: deixou de ser mockada, agora busca aluno por matrícula e notas reais no MS1 via `WebClient` `@LoadBalanced` (`GET /alunos/matricula/{matricula}` + `GET /notas?alunoId=`). MS2 nunca acessa o Postgres do MS1 diretamente — mantém *database per service*.
 - Validado de ponta a ponta: MS2 GraphQL isolado, MS1→MS2 via GraphQL, tool MS2→MS1 trazendo dado real do Postgres, e o caminho completo Cliente→Gateway→MS1→MS2.
 
-## Fase 5 — Resiliência com Resilience4j (crit. 3)
+## Fase 5 — Resiliência com Resilience4j (crit. 3) ✅
 
-- [ ] Adicionar `resilience4j-spring-boot3` + `spring-boot-starter-aop` no MS1 (e no Gateway, onde aplicável).
-- [ ] `@CircuitBreaker` + `fallbackMethod` na chamada MS1→MS2 (GraphQL) e MS1→MS3 (validação de nota).
-- [ ] `@Retry` nas mesmas chamadas (cuidado com *retry storm* — configurar backoff exponencial).
-- [ ] Rate Limiting: `RequestRateLimiter` no Gateway (server-side, protege o sistema de excesso de requisições) e/ou `@RateLimiter` client-side no MS1.
-- [ ] Retry configurado também no **Gateway** (filtro `Retry` nas rotas, conforme pedido no checklist).
-- [ ] Expor estado dos circuit breakers via Actuator (`management.health.circuitbreakers.enabled=true`, `management.endpoint.health.show-details=always`) em todos os serviços que os usam.
-- [ ] (Opcional, se der tempo) Bulkhead separando a rota de IA (mais lenta) de outras rotas do MS1.
+- [x] `resilience4j-spring-boot3` (2.1.0, gerido pelo BOM do spring-cloud-dependencies) + `spring-boot-starter-aop` no MS1.
+- [x] `@CircuitBreaker` na chamada MS1→MS2 (GraphQL, `Ms2GraphQlClient`) e MS1→MS3 (`Ms3ValidacaoClient`), com `fallbackMethod` **só no `@Retry`** (não duplicado no `@CircuitBreaker`) — descoberto na prática que colocar o mesmo fallback nos dois faz o CB engolir a exceção antes do Retry conseguir agir, zerando os retries.
+- [x] `@Retry` com backoff exponencial (200ms/300ms, multiplicador 2) nas mesmas chamadas, com `ignore-exceptions` para `CallNotPermittedException` — sem isso o Retry insistia mesmo com o circuito já aberto, anulando o fail-fast.
+- [x] Rate limiting via `@RateLimiter` (Resilience4j) em `POST /notas` (5/s) e `GET /perguntar` (3/s) no MS1, com handler dedicado devolvendo 429. Optou-se por isso em vez de `RequestRateLimiter` no Gateway pra não precisar adicionar Redis como nova infra só pra essa funcionalidade.
+- [x] Retry no **Gateway**: filtro nativo do Spring Cloud Gateway (`default-filters`), restrito a métodos `GET` — POST (lançar nota, cadastrar aluno) não é idempotente, então retry automático aí criaria duplicatas.
+- [x] Actuator expondo `circuitbreakers`, `circuitbreakerevents`, `ratelimiters`, `ratelimiterevents`; `management.health.circuitbreakers.enabled`/`ratelimiters.enabled` ligados.
+- [x] Bulkhead (semáforo, 5 chamadas concorrentes) isolando a rota de IA (`Ms2GraphQlClient`) do resto do MS1.
+- Validado de ponta a ponta: ciclo completo do circuit breaker (CLOSED→OPEN→fail-fast→HALF_OPEN→CLOSED) derrubando e religando o MS3; retry confirmado por tempo de resposta (~0,6-0,8s com MS3 fora vs ~20ms após o circuito abrir); rate limiter confirmado (excesso de requisições retorna 429). Bulkhead confirmado também: como o rate limiter de `/perguntar` (3/s) é mais restritivo e intervém antes, isolei o teste subindo temporariamente o `limit-for-period` do rate limiter pra 50 só durante o teste (revertido logo depois, não ficou commitado) e disparei 10 chamadas concorrentes — exatamente 5 passaram e 5 voltaram com `"Bulkhead 'ms2-pergunta' is full and does not permit further calls"`, batendo com `max-concurrent-calls: 5`.
 
 ## Fase 6 — Observabilidade (crit. 3)
 

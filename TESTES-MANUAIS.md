@@ -1,6 +1,6 @@
 # Roteiro de Testes Manuais — Boletim Inteligente
 
-Cobre o estado do projeto até a **Fase 4** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2). Resiliência (Fase 5) e observabilidade integrada (Fase 6) ainda não existem — os passos de Zipkin/Prometheus/Grafana aqui só validam que a *infra* sobe, não que os serviços emitem dados pra ela ainda.
+Cobre o estado do projeto até a **Fase 5** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2, Resilience4j). Observabilidade integrada (Fase 6) ainda não existe — os passos de Zipkin/Prometheus/Grafana aqui só validam que a *infra* sobe, não que os serviços emitem dados pra ela ainda.
 
 ## 0. Subindo tudo, na ordem certa
 
@@ -136,6 +136,62 @@ curl -s "http://localhost:8080/MS1-COORDENADOR/perguntar?mensagem=quais+alunos+e
 ```
 Isso passa pelas 4 camadas: Gateway resolve via Eureka → MS1 recebe REST → MS1 conversa GraphQL com o MS2 → MS2 roda RAG/Tool/LLM → resposta volta pelo mesmo caminho.
 
+## 9. Resiliência (Resilience4j) — MS1
+
+Estado inicial dos circuit breakers:
+```bash
+curl -s localhost:8081/actuator/circuitbreakers | python3 -m json.tool
+# ms3-validacao e ms2-pergunta, ambos "state":"CLOSED"
+```
+
+**Circuit Breaker + Retry (MS3)** — derrube o `ms3-serverless` (Ctrl+C) e:
+```bash
+# As 2 primeiras chamadas devem demorar ~0.6-0.9s (retry com backoff tentando de verdade)
+time curl -s -X POST localhost:8081/notas -H "Content-Type: application/json" \
+  -d '{"alunoId":1,"avaliacao":"Teste CB","valor":7,"frequencia":90,"data":"2026-07-05"}'
+
+# Repita mais 3-4 vezes -- a partir da 5a chamada o circuito abre:
+curl -s localhost:8081/actuator/circuitbreakers | python3 -c "import sys,json; print(json.load(sys.stdin)['circuitBreakers']['ms3-validacao']['state'])"
+# "OPEN"
+
+# Com o circuito OPEN, as chamadas devem ser quase instantâneas (fail-fast, sem retry desperdiçado)
+time curl -s -X POST localhost:8081/notas -H "Content-Type: application/json" \
+  -d '{"alunoId":1,"avaliacao":"Teste CB 2","valor":7,"frequencia":90,"data":"2026-07-05"}'
+# situacao:"PENDENTE_VALIDACAO", tempo ~20ms
+```
+
+Suba o `ms3-serverless` de novo, espere uns 30-40s (o Eureka do MS1 atualizar o cache + `wait-duration-in-open-state`), e repita o `POST /notas` 3 vezes — o circuito deve fechar de novo (`HALF_OPEN` → `CLOSED`) e a `situacao` volta a ser calculada de verdade.
+
+**Rate Limiter** — dispare rajadas rápidas (mais que o limite configurado: 5/s em `/notas`, 3/s em `/perguntar`):
+```bash
+for i in $(seq 1 8); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8081/notas -H "Content-Type: application/json" \
+    -d "{\"alunoId\":1,\"avaliacao\":\"RL $i\",\"valor\":7,\"frequencia\":90,\"data\":\"2026-07-05\"}"
+done
+# as primeiras ~5 dão 201, o resto dá 429 com {"erro":"Muitas requisições..."}
+```
+
+**Retry no Gateway**: o filtro é nativo do Spring Cloud Gateway, restrito a `GET` (POST não é idempotente — retry automático em `POST /notas` criaria notas duplicadas). Não há um jeito simples de forçar isso via curl sem derrubar uma instância no meio de uma requisição GET; a configuração está em `chat-configs/api-gateway.yml` (`spring.cloud.gateway.default-filters`).
+
+**Bulkhead**: protege `Ms2GraphQlClient` (máx. 5 chamadas concorrentes). Como o rate limiter de `/perguntar` (3/s) é mais restritivo e intervém primeiro, pra isolar o teste suba temporariamente o limite do rate limiter:
+
+```bash
+# em chat-configs/ms1-coordenador.yml, troque só pra teste:
+#   resilience4j.ratelimiter.instances.pergunta.limit-for-period: 3  ->  50
+# reinicie o ms1, depois dispare 10 chamadas concorrentes:
+for i in $(seq 1 10); do
+  curl -s "localhost:8081/perguntar?mensagem=explique+o+regulamento+numero+$i&chatId=bh$i" > /tmp/bh$i.json &
+done
+wait
+for i in $(seq 1 10); do echo "chamada $i: $(cat /tmp/bh$i.json | head -c 80)"; done
+# esperado: exatamente 5 respondem de verdade (ou tentam), 5 voltam com a
+# mensagem de fallback "assistente de IA está temporariamente indisponível"
+# -- confira o log do ms1 pra ver "Bulkhead 'ms2-pergunta' is full ..." exatamente 5 vezes
+grep "Bulkhead" <log do ms1>
+
+# não esqueça de reverter o limit-for-period pra 3 depois do teste
+```
+
 ---
 
 ## Checklist rápido (o que "tudo OK" significa)
@@ -149,3 +205,7 @@ Isso passa pelas 4 camadas: Gateway resolve via Eureka → MS1 recebe REST → M
 - [ ] Pergunta sobre aluno específico traz nota real do Postgres (tool funcionando).
 - [ ] Fluxo completo via Gateway (`/MS1-COORDENADOR/perguntar`) responde.
 - [ ] `/actuator/env` dá 404 no Gateway (exposição não vazando).
+- [ ] Circuit breaker do MS3 abre depois de ~5 falhas seguidas e volta a fechar quando o MS3 volta.
+- [ ] Com o circuito aberto, as respostas são quase instantâneas (fail-fast, sem retry gastando tempo à toa).
+- [ ] Rate limiter devolve 429 depois do limite configurado (5/s em `/notas`, 3/s em `/perguntar`).
+- [ ] Bulkhead rejeita exatamente as chamadas além do limite de 5 concorrentes (com rate limiter temporariamente elevado pro teste).
