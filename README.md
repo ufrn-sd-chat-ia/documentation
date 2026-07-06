@@ -56,3 +56,5 @@ A arquitetura adota a abordagem *Polyrepo*, com um repositório dedicado à conf
 5. **Grafana:** `http://localhost:3000/`
 
 > Ver `docs/TRACKER.md` para o checklist detalhado do que já está pronto e o que falta.
+> Ver `docs/GRAPHQL.md` para como e por que o GraphQL é usado entre MS1 e MS2.
+> Ver `docs/TESTES-MANUAIS.md` para um roteiro de testes manuais serviço a serviço e de ponta a ponta.

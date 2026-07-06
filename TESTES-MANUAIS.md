@@ -1,0 +1,151 @@
+# Roteiro de Testes Manuais — Boletim Inteligente
+
+Cobre o estado do projeto até a **Fase 4** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2). Resiliência (Fase 5) e observabilidade integrada (Fase 6) ainda não existem — os passos de Zipkin/Prometheus/Grafana aqui só validam que a *infra* sobe, não que os serviços emitem dados pra ela ainda.
+
+## 0. Subindo tudo, na ordem certa
+
+```bash
+cd docs && docker compose up -d              # Postgres (5433), Zipkin (9411), Prometheus (9090), Grafana (3000)
+cd ../config-server && mvn spring-boot:run    # 8888 — espera "Started ConfigServerApplication"
+cd ../eureka-server && mvn spring-boot:run    # 8761
+cd ../ms3-serverless && mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8083"
+cd ../ms1-coordenador && mvn spring-boot:run  # 8081
+cd ../ms2-ai-powered && export $(grep -v '^#' .env | xargs) && mvn spring-boot:run  # 8082 — precisa de OPENAI_API_KEY real
+cd ../api-gateway && mvn spring-boot:run      # 8080
+```
+
+Cada um em seu próprio terminal (é polyrepo, não tem módulo pai pra subir tudo com um comando só). O `ms2-ai-powered` precisa da variável `OPENAI_API_KEY` de verdade no ambiente — sem ela, o serviço nem termina de subir (a montagem do RAG chama a API de embeddings da OpenAI durante o boot).
+
+---
+
+## 1. Docker / Backing services
+
+| O quê | Como | Espera |
+|---|---|---|
+| Containers de pé | `docker compose -f docs/docker-compose.yml ps` | 4 containers `Up`/`healthy` |
+| Postgres | `docker exec boletim-postgres psql -U boletim -d boletim -c "\dt"` | tabelas `aluno`, `nota` |
+| Zipkin (navegador) | http://localhost:9411 | UI abre (sem traces ainda — Fase 6) |
+| Prometheus (navegador) | http://localhost:9090/targets | todos os targets `/actuator/prometheus` aparecem **down** — normal até a Fase 6 |
+| Grafana (navegador) | http://localhost:3000 (admin/admin) | UI abre, sem dashboards ainda |
+
+## 2. Config Server (8888)
+
+```bash
+curl -s http://localhost:8888/actuator/health          # {"status":"UP"}
+curl -s http://localhost:8888/ms1-coordenador/default   # deve trazer datasource, actuator etc.
+curl -s http://localhost:8888/api-gateway/default       # NÃO deve ter bloco "routes" estático
+```
+
+## 3. Eureka Server (8761)
+
+- Navegador: http://localhost:8761 — dashboard. Depois de subir todo mundo, "Instances currently registered" deve listar `API-GATEWAY`, `MS1-COORDENADOR`, `MS2-AI-POWERED`, `MS3-SERVERLESS`.
+
+## 4. MS3 Serverless (8083) — Spring Cloud Function isolado
+
+```bash
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":8.5,"frequencia":90}'
+# {"situacao":"APROVADO","aprovado":true, ...}
+
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":6.0,"frequencia":90}'
+# RECUPERACAO
+
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":9.0,"frequencia":50}'
+# REPROVADO_POR_FALTA (frequência < 75%, ignora a nota boa)
+
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":15,"frequencia":90}'
+# NOTA_INVALIDA
+
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8083/actuator/health   # 200
+```
+
+## 5. MS1 Coordenador (8081) — CRUD Aluno/Nota
+
+```bash
+# Cadastrar aluno
+curl -s -X POST localhost:8081/alunos -H "Content-Type: application/json" \
+  -d '{"nome":"Ana Souza","matricula":"20260001","email":"ana@ufrn.edu.br"}'
+# 201, id retornado (anote pra usar abaixo)
+
+curl -s localhost:8081/alunos                      # lista
+curl -s localhost:8081/alunos/1                     # busca por id
+curl -s localhost:8081/alunos/matricula/20260001    # busca por matrícula (usado pelo MS2)
+
+# Erros esperados
+curl -i -X POST localhost:8081/alunos -H "Content-Type: application/json" -d '{"nome":"X","matricula":"20260001"}'  # 409 (duplicada)
+curl -i localhost:8081/alunos/9999                                                                                   # 404
+
+# Lançar nota (chama o MS3 por baixo pra calcular a situação)
+curl -s -X POST localhost:8081/notas -H "Content-Type: application/json" \
+  -d '{"alunoId":1,"avaliacao":"Prova 1","valor":8.5,"frequencia":90,"data":"2026-07-01"}'
+# 201, "situacao":"APROVADO"
+
+curl -s "localhost:8081/notas?alunoId=1"    # lista notas do aluno
+curl -s localhost:8081/actuator/health      # "db":{"status":"UP", ...}
+```
+
+**Teste de fallback (importante)**: derrube o `ms3-serverless` (Ctrl+C no terminal dele) e repita o `POST /notas`. Espera **201** (não falha!) com `"situacao":"PENDENTE_VALIDACAO"`. Suba o MS3 de novo depois.
+
+## 6. MS2 AI-Powered (8082) — REST, GraphQL, RAG, Tool, MCP
+
+**REST (como já existia):**
+```bash
+curl -s "localhost:8082/ia/perguntar?mensagem=qual+a+frequ%C3%AAncia+m%C3%ADnima%3F&chatId=t1"
+```
+
+**GraphQL via GraphiQL (navegador, interface visual)**:
+http://localhost:8082/graphiql (o navegador segue um redirect automático pra `?path=/graphql`, é normal) — cole no editor:
+```graphql
+query {
+  perguntar(mensagem: "qual a frequência mínima para aprovação?", chatId: "navegador1")
+}
+```
+Clique em "Run" (▶). Deve responder citando os 75%.
+
+**GraphQL via curl:**
+```bash
+curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
+  -d '{"query":"query { perguntar(mensagem: \"qual a nota mínima para aprovação direta?\", chatId: \"t2\") }"}'
+# deve responder "7,0" (ou "7.0")
+```
+
+**Tool `consultarNotas` (aciona chamada real ao MS1)**:
+```bash
+curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
+  -d '{"query":"query { perguntar(mensagem: \"quais as notas do aluno de matrícula 20260001?\", chatId: \"t3\") }"}'
+# a resposta deve listar as notas reais que você cadastrou no passo 5 (prova de que bateu no Postgres via MS1)
+```
+
+**MCP (client de terceiro)**: sobe junto com o serviço — confirme nos logs do `mvn spring-boot:run` a linha `Server response with Protocol ... Info: Implementation[name=mcp-fetch ...]`. Não tem endpoint HTTP próprio pra testar via curl (o MCP client fala stdio com o processo `uvx mcp-server-fetch`).
+
+## 7. API Gateway (8080) — roteamento dinâmico e ponto de entrada único
+
+```bash
+curl -s localhost:8080/actuator/gateway/routes | python3 -m json.tool
+# só rotas dinâmicas: /API-GATEWAY/**, /MS1-COORDENADOR/**, /MS2-AI-POWERED/**, /MS3-SERVERLESS/** -- nenhuma estática
+
+curl -s localhost:8080/MS1-COORDENADOR/alunos                 # rota até o MS1 via gateway
+curl -s -X POST localhost:8080/MS3-SERVERLESS/validarNota -H "Content-Type: application/json" -d '{"valor":8,"frequencia":90}'
+
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/actuator/env   # 404 esperado (não exposto)
+```
+
+## 8. Ponta a ponta: Cliente → Gateway → MS1 → GraphQL → MS2
+
+```bash
+curl -s "http://localhost:8080/MS1-COORDENADOR/perguntar?mensagem=quais+alunos+est%C3%A3o+em+recupera%C3%A7%C3%A3o%3F&chatId=e2e1"
+```
+Isso passa pelas 4 camadas: Gateway resolve via Eureka → MS1 recebe REST → MS1 conversa GraphQL com o MS2 → MS2 roda RAG/Tool/LLM → resposta volta pelo mesmo caminho.
+
+---
+
+## Checklist rápido (o que "tudo OK" significa)
+
+- [ ] Eureka lista os 4 serviços (gateway, ms1, ms2, ms3) como `UP`.
+- [ ] Gateway só tem rotas dinâmicas (`/actuator/gateway/routes`).
+- [ ] CRUD de Aluno/Nota funciona, incluindo os erros esperados (409/404/400).
+- [ ] Nota lançada aparece com `situacao` calculada (MS1→MS3 funcionando).
+- [ ] Derrubar o MS3 não quebra o lançamento de nota (fallback `PENDENTE_VALIDACAO`).
+- [ ] GraphiQL abre no navegador e responde perguntas de regulamento.
+- [ ] Pergunta sobre aluno específico traz nota real do Postgres (tool funcionando).
+- [ ] Fluxo completo via Gateway (`/MS1-COORDENADOR/perguntar`) responde.
+- [ ] `/actuator/env` dá 404 no Gateway (exposição não vazando).

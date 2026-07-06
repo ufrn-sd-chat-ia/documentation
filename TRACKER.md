@@ -55,12 +55,13 @@ O que **ainda não existe** no projeto (Fases 2 em diante):
 - [x] Exposto via `spring-cloud-function-web` em `POST /validarNota` (exigiu adicionar `spring-boot-starter-web` também — `spring-cloud-function-web` sozinho não traz servidor HTTP embutido).
 - [x] Integrado ao fluxo de "lançar nota" do MS1: `NotaService` chama o MS3 via `RestClient` `@LoadBalanced` (Eureka) a cada nota lançada. Sem o MS3, a nota ainda é salva com `situacao: PENDENTE_VALIDACAO` (paraquedas manual via try/catch — o Circuit Breaker de verdade é da Fase 5).
 
-## Fase 4 — GraphQL entre MS1 e MS2 (crit. 2)
+## Fase 4 — GraphQL entre MS1 e MS2 (crit. 2) ✅
 
-- [ ] MS2: adicionar `spring-boot-starter-graphql`, definir schema (`.graphqls`) com uma query tipo `perguntar(mensagem: String, chatId: String): String`, ligar ao `AiChatService` já existente.
-- [ ] MS1: adicionar client GraphQL (`spring-graphql` `HttpGraphQlClient` ou `WebClient` + `graphql-java` client) para consumir o MS2.
-- [ ] Atualizar RAG do MS2: trocar `conhecimento.txt` de "regulamento de Sistemas Distribuídos" para o **regulamento de avaliação da turma** (critérios de aprovação, pesos de prova, frequência mínima) — conteúdo do novo domínio.
-- [ ] Tool `consultarNota` do MS2 deixa de ser mockada: chama o MS1 via `WebClient` (REST) para buscar dado real — mantém o princípio de *database per service* (MS2 nunca acessa o Postgres do MS1 diretamente).
+- [x] MS2: adicionado `spring-boot-starter-graphql`, schema (`graphql/schema.graphqls`) com `perguntar(mensagem: String!, chatId: String): String`, ligado ao `AiChatService` já existente via `PerguntaGraphQlController` (`@QueryMapping`). Exposto em `POST /graphql`.
+- [x] MS1: client GraphQL via `spring-graphql` (`HttpGraphQlClient` sobre um `WebClient` `@LoadBalanced`, resolvendo `ms2-ai-powered` via Eureka). Novo endpoint `GET /perguntar?mensagem=...&chatId=...` delega pro MS2 — fecha o item que tinha ficado em aberto da Fase 2.
+- [x] RAG do MS2: `conhecimento.txt` trocado do regulamento de Sistemas Distribuídos para o regulamento de avaliação (frequência mínima 75%, critérios de aprovação/recuperação/reprovação — os mesmos números do MS3, pra IA e a validação não divergirem).
+- [x] Tool `consultarNota` → `consultarNotas`: deixou de ser mockada, agora busca aluno por matrícula e notas reais no MS1 via `WebClient` `@LoadBalanced` (`GET /alunos/matricula/{matricula}` + `GET /notas?alunoId=`). MS2 nunca acessa o Postgres do MS1 diretamente — mantém *database per service*.
+- Validado de ponta a ponta: MS2 GraphQL isolado, MS1→MS2 via GraphQL, tool MS2→MS1 trazendo dado real do Postgres, e o caminho completo Cliente→Gateway→MS1→MS2.
 
 ## Fase 5 — Resiliência com Resilience4j (crit. 3)
 
