@@ -83,21 +83,27 @@ O que **ainda não existe** no projeto (Fases 2 em diante):
 - [x] **Bug real encontrado e corrigido**: os traces se quebravam entre MS1→MS3 e MS1→MS2 (cada chamada virava um trace novo, sem correlação). Causa: os beans `RestClient.Builder`/`WebClient.Builder` `@LoadBalanced` eram criados via `RestClient.builder()`/`WebClient.builder()` puro, sem passar pelas customizações automáticas do Boot (`RestClientBuilderConfigurer`/`WebClientCustomizer`) que injetam o `ObservationRestClientCustomizer`/`ObservationWebClientCustomizer` responsáveis por propagar o contexto de trace. Corrigido injetando e aplicando esses configurers/customizers nos 3 beans manuais (`ms1-coordenador` × 2, `ms2-ai-powered` × 1). Depois da correção, um único `traceId` cobre Gateway → MS1 → MS3 e também Gateway → MS1 → MS2 (incluindo sub-spans do Spring AI: RAG, tool call, chat, embeddings).
 - [x] Roteiro de demonstração validado de verdade nas métricas do Prometheus (as mesmas que alimentam o Grafana): MS3 no ar → `resilience4j_circuitbreaker_state{state="closed"}=1`; derrubei o MS3 e gerei tráfego → `state="open"=1`, `failure_rate=80%`; religuei o MS3 → depois do `wait-duration-in-open-state` + cache do Eureka atualizar, `half_open=1`; tráfego de sucesso → `closed=1` de novo, `failure_rate` resetado.
 
-## Fase 7 — MCP próprio + configuração em runtime (crit. 4 + 12-Factor)
+## Fase 7 — MCP próprio + configuração em runtime (crit. 4 + 12-Factor) ✅
 
-- [ ] Criar `mcp-server-academico`: pequeno servidor MCP próprio (Spring AI `spring-ai-starter-mcp-server`) expondo tools do domínio acadêmico (ex.: `listarProximasAvaliacoes`, `buscarRegrasDeAprovacao`).
-- [ ] MS2 passa a ter **dois** MCP clients: o de terceiro (`fetch`, já existente) e o próprio (`mcp-server-academico`) — atende literalmente "MCP Server criado pelo aluno e MCP Server de Terceiro".
-- [ ] Configuração alterável em tempo de execução: expor `/actuator/refresh` (ou Spring Cloud Bus, se houver tempo) nos serviços com `@RefreshScope`, permitindo alterar uma propriedade no `chat-configs` e refletir sem reiniciar o serviço.
-- [ ] Eureka em modo cluster: 2 instâncias peer-aware (via `--spring.profiles.active` com `application-peer1.yml`/`application-peer2.yml`, cada uma apontando `defaultZone` para a outra).
-- [ ] Gateway: remover a rota manual (`RewritePath`) e configurar **apenas** via `discovery.locator` + regras no `application.yml` do config-server (nada hard-coded no `api-gateway`), conforme pedido no checklist.
+- [x] Novo módulo/repo `mcp-server-academico` (porta 8084, `spring-ai-starter-mcp-server-webmvc`): expõe `buscarRegrasDeAprovacao` (frequência mínima, cortes de nota — lidos do mesmo `boletim.avaliacao.*` do MS3) e `explicarSituacao` (explica os códigos APROVADO/RECUPERACAO/REPROVADO/REPROVADO_POR_FALTA/PENDENTE_VALIDACAO).
+- [x] MS2 agora tem **dois** MCP clients de verdade: o de terceiro (`mcp-fetch`, stdio) e o próprio (`mcp-server-academico`, SSE/HTTP via `HttpClientSseClientTransport`) — atende literalmente "MCP Server criado pelo aluno e MCP Server de Terceiro". **Bug corrigido de quebra**: os clients MCP só se conectavam, nunca eram de fato oferecidos como tools ao `ChatClient` (faltava o `SyncMcpToolCallbackProvider` + `.defaultToolCallbacks(...)`) — sem isso, o MCP nunca teria sido realmente "invocado" pela IA, só uma conexão inútil.
+- [x] Configuração em runtime: `@RefreshScope` em `RegrasAvaliacaoProperties` (MS3 e mcp-server-academico, mesmo prefixo `boletim.avaliacao`, fonte única no `chat-configs/application.yml`) + `/actuator/refresh` exposto. Testado ao vivo: mudei `media-aprovacao` de 7.0 para 6.0 no `chat-configs`, dei `POST /actuator/refresh` nos dois serviços (sem reiniciar) e uma nota 6.5 que antes dava `RECUPERACAO` passou a dar `APROVADO` na hora.
+- [x] Eureka em modo cluster: 2 nós peer-aware (`--spring.profiles.active=peer1/peer2`, portas 8761/8762, mesma máquina). **Bug real encontrado e corrigido**: com os dois nós usando `eureka.instance.hostname: localhost`, o `PeerEurekaNodes` do Eureka filtrava o peer como sendo "ele mesmo" (comparação de hostname, não de host+porta) — o dashboard mostrava peer-awareness, mas a réplica do registro entre os nós nunca acontecia de verdade (cada nó só via os serviços que registraram diretamente nele, e o Gateway dava 404 pra serviços "do outro lado"). Corrigido usando hostnames distintos (`127.0.0.1` num nó, `localhost` no outro) — replicação bidirecional completa confirmada (os dois nós passam a ver as mesmas 5 aplicações), e testei failover de verdade: derrubei o peer1, o fluxo completo (Gateway→MS1→MS3) continuou funcionando 100% via peer2.
+- [x] Gateway sem rota manual (`discovery.locator` apenas) — já resolvido antes desta fase, quando ajustamos as inconsistências do `chat-configs`.
 
 ## Fase 8 — Testes de carga e validação final
 
-- [ ] Criar plano JMeter (`.jmx`) cobrindo o fluxo ponta-a-ponta (Gateway → MS1 → MS2/MS3).
+- [x] Criar plano JMeter (`.jmx`) cobrindo o fluxo ponta-a-ponta (Gateway → MS1 → MS2/MS3). Plano em
+  `docs/jmeter/boletim-inteligente.jmx` (+ `perguntas.csv`), dividido em 2 grupos de carga: CRUD
+  Aluno/Nota (escalável via `-Jthreads`, usado pra achar knee/usable capacity) e `/perguntar` (escala
+  fixa e pequena, de propósito — custa chamada real de LLM e já é limitado a 3 req/s pelo rate limiter da
+  Fase 5, então escalar esse grupo não mediria capacidade real, só re-confirmaria o rate limiter).
+  Roteiro completo de uso (parâmetros `-J`, como ler Summary/Aggregate Report) e a lista item-a-item pra
+  montar o mesmo plano manualmente na GUI em `docs/TESTES-CARGA.md`.
 - [ ] Rodar o teste com usuários simultâneos > 5 e identificar o **Knee Capacity** e a **Usable Capacity** do sistema.
 - [ ] Validar que o Summary Report do JMeter fecha com zero erros em condição normal.
 - [ ] Ensaiar o roteiro de falha/recuperação (derrubar instância → religar) com o Grafana aberto, conforme será cobrado na apresentação.
-- [ ] Revisar todos os 12 fatores um a um antes da entrega (log como event stream, disposability, etc.).
+- [ ] Revisar todos os 12 fatores um a um antes da entrega (log como event stream, disposability, etc.) — checklist inicial já em `docs/TESTES-CARGA.md`, seção 6, pendente de conferência ao vivo.
 
 ---
 

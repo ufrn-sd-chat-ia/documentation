@@ -1,20 +1,22 @@
 # Roteiro de Testes Manuais — Boletim Inteligente
 
-Cobre o estado do projeto até a **Fase 6** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2, Resilience4j, Observabilidade).
+Cobre o estado do projeto até a **Fase 7** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2, Resilience4j, Observabilidade, MCP próprio, config em runtime, Eureka em cluster).
 
 ## 0. Subindo tudo, na ordem certa
 
 ```bash
-cd docs && docker compose up -d              # Postgres (5433), Zipkin (9411), Prometheus (9090), Grafana (3000)
+cd docs && docker compose up -d              # Postgres (5434), Zipkin (9411), Prometheus (9090), Grafana (3000)
 cd ../config-server && mvn spring-boot:run    # 8888 — espera "Started ConfigServerApplication"
-cd ../eureka-server && mvn spring-boot:run    # 8761
+cd ../eureka-server && mvn spring-boot:run -Dspring-boot.run.profiles=peer1   # 8761
+cd ../eureka-server && mvn spring-boot:run -Dspring-boot.run.profiles=peer2   # 8762 (outro terminal)
+cd ../mcp-server-academico && mvn spring-boot:run  # 8084
 cd ../ms3-serverless && mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8083"
 cd ../ms1-coordenador && mvn spring-boot:run  # 8081
 cd ../ms2-ai-powered && export $(grep -v '^#' .env | xargs) && mvn spring-boot:run  # 8082 — precisa de OPENAI_API_KEY real
 cd ../api-gateway && mvn spring-boot:run      # 8080
 ```
 
-Cada um em seu próprio terminal (é polyrepo, não tem módulo pai pra subir tudo com um comando só). O `ms2-ai-powered` precisa da variável `OPENAI_API_KEY` de verdade no ambiente — sem ela, o serviço nem termina de subir (a montagem do RAG chama a API de embeddings da OpenAI durante o boot).
+Cada um em seu próprio terminal (é polyrepo, não tem módulo pai pra subir tudo com um comando só). O `ms2-ai-powered` precisa da variável `OPENAI_API_KEY` de verdade no ambiente — sem ela, o serviço nem termina de subir (a montagem do RAG chama a API de embeddings da OpenAI durante o boot). Suba `peer1` bem antes de `peer2` (uns 5-10s de diferença) pra evitar barulho de log de conexão recusada no primeiro boot — é só ruído, não afeta o resultado final.
 
 ---
 
@@ -25,7 +27,7 @@ Cada um em seu próprio terminal (é polyrepo, não tem módulo pai pra subir tu
 | Containers de pé | `docker compose -f docs/docker-compose.yml ps` | 4 containers `Up`/`healthy` |
 | Postgres | `docker exec boletim-postgres psql -U boletim -d boletim -c "\dt"` | tabelas `aluno`, `nota` |
 | Zipkin (navegador) | http://localhost:9411 | UI abre; depois de gerar tráfego (seção 8), busque por serviço e veja os traces |
-| Prometheus (navegador) | http://localhost:9090/targets | os 6 targets `/actuator/prometheus` aparecem **up** |
+| Prometheus (navegador) | http://localhost:9090/targets | os 7 targets `/actuator/prometheus` aparecem **up** |
 | Grafana (navegador) | http://localhost:3000 (admin/admin) | dashboard "Resilience4j" já aparece na lista, sem precisar importar nada manualmente |
 
 ## 2. Config Server (8888)
@@ -36,9 +38,17 @@ curl -s http://localhost:8888/ms1-coordenador/default   # deve trazer datasource
 curl -s http://localhost:8888/api-gateway/default       # NÃO deve ter bloco "routes" estático
 ```
 
-## 3. Eureka Server (8761)
+## 3. Eureka Server em cluster (8761 + 8762)
 
-- Navegador: http://localhost:8761 — dashboard. Depois de subir todo mundo, "Instances currently registered" deve listar `API-GATEWAY`, `MS1-COORDENADOR`, `MS2-AI-POWERED`, `MS3-SERVERLESS`.
+```bash
+# os dois nós devem ver exatamente as mesmas aplicações registradas
+curl -s localhost:8761/eureka/apps -H "Accept: application/json" | python3 -c "import sys,json; print(sorted([a['name'] for a in json.load(sys.stdin)['applications']['application']]))"
+curl -s localhost:8762/eureka/apps -H "Accept: application/json" | python3 -c "import sys,json; print(sorted([a['name'] for a in json.load(sys.stdin)['applications']['application']]))"
+# as duas listas devem ser IDÊNTICAS (replicação de verdade, não só peer-awareness de dashboard)
+```
+
+- Navegador: http://localhost:8761 (e http://localhost:8762) — dashboard mostra "DS Replicas" com o outro nó, e "Instances currently registered" deve listar `API-GATEWAY`, `MS1-COORDENADOR`, `MS2-AI-POWERED`, `MS3-SERVERLESS`, `MCP-SERVER-ACADEMICO` **nos dois**.
+- **Teste de failover**: derrube um dos dois nós (Ctrl+C) e repita um teste de ponta a ponta (seção 8) — deve continuar funcionando, só com o outro nó no ar.
 
 ## 4. MS3 Serverless (8083) — Spring Cloud Function isolado
 
@@ -115,7 +125,14 @@ curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
 # a resposta deve listar as notas reais que você cadastrou no passo 5 (prova de que bateu no Postgres via MS1)
 ```
 
-**MCP (client de terceiro)**: sobe junto com o serviço — confirme nos logs do `mvn spring-boot:run` a linha `Server response with Protocol ... Info: Implementation[name=mcp-fetch ...]`. Não tem endpoint HTTP próprio pra testar via curl (o MCP client fala stdio com o processo `uvx mcp-server-fetch`).
+**MCP (dois clients: terceiro + próprio)**: confirme nos logs do `mvn spring-boot:run` duas linhas `Server response with Protocol ...`, uma com `Info: Implementation[name=mcp-fetch ...]` (terceiro, stdio) e outra com `Info: Implementation[name=mcp-server ...]` (o `mcp-server-academico`, SSE/HTTP). Teste que a IA realmente aciona a tool do MCP próprio (não só conecta):
+```bash
+curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
+  -d '{"query":"query { perguntar(mensagem: \"explique detalhadamente o que significa a situação PENDENTE_VALIDACAO\", chatId: \"mcptest\") }"}'
+# a resposta deve mencionar "serviço de validação de notas (MS3) estava indisponível" -- esse texto só
+# existe na tool explicarSituacao do mcp-server-academico, não no RAG nem em nenhum outro lugar,
+# então essa resposta prova que o MCP próprio foi realmente invocado (não só conectado)
+```
 
 ## 7. API Gateway (8080) — roteamento dinâmico e ponto de entrada único
 
@@ -226,11 +243,35 @@ curl -s -G localhost:9090/api/v1/query --data-urlencode 'query=resilience4j_circ
 curl -s -G localhost:9090/api/v1/query --data-urlencode 'query=resilience4j_circuitbreaker_state{name="ms3-validacao",state="closed"}'
 ```
 
+## 11. Configuração alterável em tempo de execução (Fase 7)
+
+```bash
+# 1. Comportamento atual (corte de aprovação em 7.0)
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":6.5,"frequencia":90}'
+# "situacao":"RECUPERACAO"
+
+# 2. Edite chat-configs/application.yml: boletim.avaliacao.media-aprovacao de 7.0 para 6.0
+
+# 3. Sem reiniciar nada, manda os dois refletirem a mudança:
+curl -s -X POST localhost:8083/actuator/refresh   # ms3-serverless
+curl -s -X POST localhost:8084/actuator/refresh   # mcp-server-academico
+# cada um responde a lista de properties que mudaram: ["boletim.avaliacao.media-aprovacao"]
+
+# 4. Mesma nota 6.5 agora deve dar "APROVADO" (sem reiniciar o serviço)
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":6.5,"frequencia":90}'
+
+# não esqueça de reverter media-aprovacao pra 7.0 e dar refresh de novo depois do teste
+```
+
 ---
 
 ## Checklist rápido (o que "tudo OK" significa)
 
-- [ ] Eureka lista os 4 serviços (gateway, ms1, ms2, ms3) como `UP`.
+- [ ] Os dois nós do Eureka (8761 e 8762) veem exatamente as mesmas 5 aplicações registradas.
+- [ ] Derrubar um nó do Eureka não quebra o fluxo ponta-a-ponta (failover funcionando).
+- [ ] MS2 conecta nos dois MCP clients (fetch de terceiro + mcp-server-academico próprio) e a IA realmente aciona tools do próprio (não só conecta).
+- [ ] `POST /actuator/refresh` no MS3/mcp-server-academico reflete mudança do `chat-configs` sem reiniciar o serviço.
+- [ ] Eureka lista os 5 serviços (gateway, ms1, ms2, ms3, mcp-server-academico) como `UP`.
 - [ ] Gateway só tem rotas dinâmicas (`/actuator/gateway/routes`).
 - [ ] CRUD de Aluno/Nota funciona, incluindo os erros esperados (409/404/400).
 - [ ] Nota lançada aparece com `situacao` calculada (MS1→MS3 funcionando).

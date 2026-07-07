@@ -41,8 +41,8 @@ A arquitetura adota a abordagem *Polyrepo*, com um repositório dedicado à conf
 | **MS1-Coordenador** | `8081` | CRUD de Aluno/Nota + orquestração/resiliência. |
 | **MS2-Cérebro AI** | `8082` | GraphQL + RAG + Chat Memory + MCP. |
 | **MS3-Serverless** | `8083` | Spring Cloud Function (validação de nota). |
-| **mcp-server-academico** | `8084` (ou STDIO) | Servidor MCP próprio, consumido pelo MS2. |
-| **PostgreSQL** | `5433` (mapeado do `5432` do container — evita conflito com Postgres nativo do host) | Banco do MS1 (via Docker). |
+| **mcp-server-academico** | `8084` (SSE/HTTP) | Servidor MCP próprio, consumido pelo MS2. |
+| **PostgreSQL** | `5434` (mapeado do `5432` do container — evita conflito com Postgres nativo do host e com o de outro projeto na mesma máquina) | Banco do MS1 (via Docker). |
 | **Zipkin** | `9411` | Distributed tracing. |
 | **Prometheus** | `9090` | Coleta de métricas. |
 | **Grafana** | `3000` | Dashboards (inclui estado dos circuit breakers). |

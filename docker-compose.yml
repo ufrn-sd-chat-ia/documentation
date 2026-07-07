@@ -8,9 +8,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-boletim}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-boletim}
     ports:
-      # 5432 já está ocupado pelo Postgres nativo do host (systemd) nesta
-      # máquina de desenvolvimento — expõe em 5433 para evitar conflito.
-      - "5433:5432"
+      # 5432 já está ocupado pelo Postgres nativo do host (systemd), e 5433
+      # por um Postgres de outro projeto (smart-space-booking) nesta mesma
+      # máquina de desenvolvimento — expõe em 5434 para evitar conflito.
+      - "5434:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
