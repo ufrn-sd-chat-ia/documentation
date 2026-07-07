@@ -1,6 +1,6 @@
 # Roteiro de Testes Manuais — Boletim Inteligente
 
-Cobre o estado do projeto até a **Fase 5** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2, Resilience4j). Observabilidade integrada (Fase 6) ainda não existe — os passos de Zipkin/Prometheus/Grafana aqui só validam que a *infra* sobe, não que os serviços emitem dados pra ela ainda.
+Cobre o estado do projeto até a **Fase 6** (Fundação, domínio Aluno/Nota, MS3 serverless, GraphQL MS1↔MS2, Resilience4j, Observabilidade).
 
 ## 0. Subindo tudo, na ordem certa
 
@@ -24,9 +24,9 @@ Cada um em seu próprio terminal (é polyrepo, não tem módulo pai pra subir tu
 |---|---|---|
 | Containers de pé | `docker compose -f docs/docker-compose.yml ps` | 4 containers `Up`/`healthy` |
 | Postgres | `docker exec boletim-postgres psql -U boletim -d boletim -c "\dt"` | tabelas `aluno`, `nota` |
-| Zipkin (navegador) | http://localhost:9411 | UI abre (sem traces ainda — Fase 6) |
-| Prometheus (navegador) | http://localhost:9090/targets | todos os targets `/actuator/prometheus` aparecem **down** — normal até a Fase 6 |
-| Grafana (navegador) | http://localhost:3000 (admin/admin) | UI abre, sem dashboards ainda |
+| Zipkin (navegador) | http://localhost:9411 | UI abre; depois de gerar tráfego (seção 8), busque por serviço e veja os traces |
+| Prometheus (navegador) | http://localhost:9090/targets | os 6 targets `/actuator/prometheus` aparecem **up** |
+| Grafana (navegador) | http://localhost:3000 (admin/admin) | dashboard "Resilience4j" já aparece na lista, sem precisar importar nada manualmente |
 
 ## 2. Config Server (8888)
 
@@ -192,6 +192,40 @@ grep "Bulkhead" <log do ms1>
 # não esqueça de reverter o limit-for-period pra 3 depois do teste
 ```
 
+## 10. Observabilidade (Zipkin + Prometheus + Grafana)
+
+**Prometheus — todos os targets `up`:**
+```bash
+curl -s http://localhost:9090/api/v1/targets | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for t in d['data']['activeTargets']: print(t['scrapeUrl'], t['health'])
+"
+```
+
+**Zipkin — trace distribuído completo:** faça uma pergunta via MS1 (`curl "localhost:8081/perguntar?mensagem=...&chatId=x"`), espere uns 3s, e busque em http://localhost:9411 pelo serviço `ms1-coordenador`. Um único trace deve mostrar `ms1-coordenador` → `ms2-ai-powered` com sub-spans de RAG (`embedding`), tool calling (`tool_call consultar-notas`) e chat (`chat gpt-3.5-turbo`) — e se a pergunta disparar a tool, o trace volta pro `ms1-coordenador` (`GET /alunos/matricula/{matricula}`).
+
+**Grafana — dashboard Resilience4j com dado real:**
+1. Abra http://localhost:3000 (admin/admin) → dashboard "Resilience4j" já deve estar na lista (provisionado automaticamente, não precisa importar).
+2. Selecione `application=ms1-coordenador` e `circuitbreaker_name=ms3-validacao` (ou `ms2-pergunta`) nas variáveis do topo.
+3. Gere tráfego (lance notas, derrube o MS3) e veja os painéis mudarem: estado do circuito, taxa de falha, chamadas em buffer.
+
+**Roteiro de falha/recuperação (o que o professor vai cobrar na apresentação):**
+```bash
+# 1. Estado normal
+curl -s -G localhost:9090/api/v1/query --data-urlencode 'query=resilience4j_circuitbreaker_state{name="ms3-validacao",state="closed"}'
+
+# 2. Derrube o ms3-serverless (Ctrl+C) e gere ~6 falhas
+for i in $(seq 1 6); do curl -s -X POST localhost:8081/notas -H "Content-Type: application/json" -d "{\"alunoId\":1,\"avaliacao\":\"F$i\",\"valor\":7,\"frequencia\":90,\"data\":\"2026-07-06\"}" >/dev/null; done
+
+# 3. Confirme que abriu (visível também no painel do Grafana)
+curl -s -G localhost:9090/api/v1/query --data-urlencode 'query=resilience4j_circuitbreaker_state{name="ms3-validacao",state="open"}'
+
+# 4. Suba o ms3-serverless de novo, espere ~40s (wait-duration + cache do Eureka)
+# 5. Gere 3 chamadas de sucesso -- confirme que fechou o circuito de novo
+curl -s -G localhost:9090/api/v1/query --data-urlencode 'query=resilience4j_circuitbreaker_state{name="ms3-validacao",state="closed"}'
+```
+
 ---
 
 ## Checklist rápido (o que "tudo OK" significa)
@@ -209,3 +243,7 @@ grep "Bulkhead" <log do ms1>
 - [ ] Com o circuito aberto, as respostas são quase instantâneas (fail-fast, sem retry gastando tempo à toa).
 - [ ] Rate limiter devolve 429 depois do limite configurado (5/s em `/notas`, 3/s em `/perguntar`).
 - [ ] Bulkhead rejeita exatamente as chamadas além do limite de 5 concorrentes (com rate limiter temporariamente elevado pro teste).
+- [ ] Prometheus mostra os 6 targets `up`.
+- [ ] Zipkin mostra um trace único cobrindo Gateway→MS1→MS2 (ou MS3), sem quebras.
+- [ ] Grafana já tem o datasource Prometheus e o dashboard "Resilience4j" sem nenhum passo manual.
+- [ ] Derrubar/religar o MS3 reflete em tempo real em `resilience4j_circuitbreaker_state` (e portanto no painel do Grafana).

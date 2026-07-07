@@ -1,13 +1,10 @@
 global:
   scrape_interval: 5s
 
-# Os microsserviços rodam no host (fora do Docker) até a containerização
-# opcional prevista na Fase 1/6. host.docker.internal aponta de volta pro
-# host a partir de dentro do container do Prometheus.
-#
-# /actuator/prometheus só existe a partir da Fase 6 (micrometer-registry-
-# prometheus); até lá esses targets aparecem como "down" no Prometheus,
-# o que é esperado.
+# Os microsserviços rodam no host (fora do Docker), não containerizados.
+# host.docker.internal aponta de volta pro host a partir de dentro do
+# container do Prometheus. Desde a Fase 6 todos os serviços expõem
+# /actuator/prometheus (micrometer-registry-prometheus).
 scrape_configs:
   - job_name: api-gateway
     metrics_path: /actuator/prometheus

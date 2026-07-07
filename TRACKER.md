@@ -74,13 +74,14 @@ O que **ainda não existe** no projeto (Fases 2 em diante):
 - [x] Bulkhead (semáforo, 5 chamadas concorrentes) isolando a rota de IA (`Ms2GraphQlClient`) do resto do MS1.
 - Validado de ponta a ponta: ciclo completo do circuit breaker (CLOSED→OPEN→fail-fast→HALF_OPEN→CLOSED) derrubando e religando o MS3; retry confirmado por tempo de resposta (~0,6-0,8s com MS3 fora vs ~20ms após o circuito abrir); rate limiter confirmado (excesso de requisições retorna 429). Bulkhead confirmado também: como o rate limiter de `/perguntar` (3/s) é mais restritivo e intervém antes, isolei o teste subindo temporariamente o `limit-for-period` do rate limiter pra 50 só durante o teste (revertido logo depois, não ficou commitado) e disparei 10 chamadas concorrentes — exatamente 5 passaram e 5 voltaram com `"Bulkhead 'ms2-pergunta' is full and does not permit further calls"`, batendo com `max-concurrent-calls: 5`.
 
-## Fase 6 — Observabilidade (crit. 3)
+## Fase 6 — Observabilidade (crit. 3) ✅
 
-- [ ] Adicionar `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` em todos os serviços; subir Zipkin via Docker Compose.
-- [ ] Adicionar `micrometer-registry-prometheus` em todos os serviços; expor `/actuator/prometheus`.
-- [ ] Subir Prometheus (scrape configs apontando pros `/actuator/prometheus` de cada serviço) e Grafana via Docker Compose.
-- [ ] Importar o dashboard oficial do Resilience4j no Grafana (JSON disponível em `resilience4j.readme.io/docs/grafana-1`) para visualizar estado dos circuit breakers em tempo real.
-- [ ] Validar o roteiro de demonstração pedido pelo professor: derrubar uma instância → taxa de erro sobe (visível no Grafana) → subir instância nova → taxa de erro cai.
+- [x] `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` nos 6 serviços; Zipkin já estava de pé desde a Fase 1.
+- [x] `micrometer-registry-prometheus` nos 6 serviços + `prometheus` na exposição do actuator de cada um (`config-server` e `eureka-server` ganharam exposição própria — o primeiro no `application.yml` local, já que não pode se auto-configurar via Config Server; o segundo em `chat-configs/eureka-server.yml`, novo).
+- [x] Sampling de tracing em 100% (`management.tracing.sampling.probability: 1.0`) e endpoint do Zipkin, ambos no `chat-configs/application.yml` (globais, valem pra todos os serviços).
+- [x] Dashboard **oficial** do Resilience4j importado de verdade: baixado direto de `github.com/resilience4j/resilience4j/blob/master/grafana_dashboard.json` (o mesmo referenciado em `resilience4j.readme.io/docs/grafana-1`), com `${DS_PROMETHEUS}` substituído pelo uid fixo do datasource provisionado. Provisionamento automático via `docker-compose` (datasource + dashboard sobem sozinhos, sem clique manual no Grafana).
+- [x] **Bug real encontrado e corrigido**: os traces se quebravam entre MS1→MS3 e MS1→MS2 (cada chamada virava um trace novo, sem correlação). Causa: os beans `RestClient.Builder`/`WebClient.Builder` `@LoadBalanced` eram criados via `RestClient.builder()`/`WebClient.builder()` puro, sem passar pelas customizações automáticas do Boot (`RestClientBuilderConfigurer`/`WebClientCustomizer`) que injetam o `ObservationRestClientCustomizer`/`ObservationWebClientCustomizer` responsáveis por propagar o contexto de trace. Corrigido injetando e aplicando esses configurers/customizers nos 3 beans manuais (`ms1-coordenador` × 2, `ms2-ai-powered` × 1). Depois da correção, um único `traceId` cobre Gateway → MS1 → MS3 e também Gateway → MS1 → MS2 (incluindo sub-spans do Spring AI: RAG, tool call, chat, embeddings).
+- [x] Roteiro de demonstração validado de verdade nas métricas do Prometheus (as mesmas que alimentam o Grafana): MS3 no ar → `resilience4j_circuitbreaker_state{state="closed"}=1`; derrubei o MS3 e gerei tráfego → `state="open"=1`, `failure_rate=80%`; religuei o MS3 → depois do `wait-duration-in-open-state` + cache do Eureka atualizar, `half_open=1`; tráfego de sucesso → `closed=1` de novo, `failure_rate` resetado.
 
 ## Fase 7 — MCP próprio + configuração em runtime (crit. 4 + 12-Factor)
 
