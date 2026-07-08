@@ -138,10 +138,20 @@ curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
 
 ```bash
 curl -s localhost:8080/actuator/gateway/routes | python3 -m json.tool
-# só rotas dinâmicas: /API-GATEWAY/**, /MS1-COORDENADOR/**, /MS2-AI-POWERED/**, /MS3-SERVERLESS/** -- nenhuma estática
+# só rota dinâmica pro /MS1-COORDENADOR/** -- de propósito, desde que restringimos o
+# discovery.locator com include-expression: "serviceId=='MS1-COORDENADOR'" (ver
+# chat-configs/api-gateway.yml). MS2/MS3/mcp-server-academico NÃO ganham rota pelo
+# Gateway: só o MS1 é ponto de entrada público, e é ele quem tem @RateLimiter/@CircuitBreaker
+# protegendo as chamadas pra esses serviços -- sem essa restrição, dava pra chamar
+# "/MS2-AI-POWERED/ia/perguntar" direto e furar o rate limiter da IA.
 
 curl -s localhost:8080/MS1-COORDENADOR/alunos                 # rota até o MS1 via gateway
-curl -s -X POST localhost:8080/MS3-SERVERLESS/validarNota -H "Content-Type: application/json" -d '{"valor":8,"frequencia":90}'
+
+curl -s -X POST localhost:8083/validarNota -H "Content-Type: application/json" -d '{"valor":8,"frequencia":90}'
+# MS3 direto na porta dele (8083) -- não existe mais via Gateway, de propósito (ver acima)
+
+curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/MS2-AI-POWERED/ia/perguntar
+# 404 esperado -- confirma que a rota "lateral" pro MS2 realmente não existe mais
 
 curl -s -o /dev/null -w "%{http_code}\n" localhost:8080/actuator/env   # 404 esperado (não exposto)
 ```
