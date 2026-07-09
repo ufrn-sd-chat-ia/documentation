@@ -15,7 +15,7 @@ Três peças centrais:
 
 ## Por que o trabalho pede isso
 
-A descrição do trabalho exige que o **MS1 (coordenador)** seja **cliente GraphQL** e o **MS2 (IA)** seja **servidor GraphQL** — ou seja, a comunicação MS1→MS2 especificamente (não a comunicação Gateway→MS1, que continua REST) tem que passar por GraphQL. Isso é pedido pra demonstrar, na prática, que o grupo sabe **consumir e expor** os dois lados do protocolo dentro de uma arquitetura de microserviços — não é uma exigência de performance ou de modelagem de dados complexa (nosso schema tem só um campo!), é uma exigência de **demonstrar o padrão**.
+A descrição do trabalho exige que o **MS1 (coordenador)** seja **cliente GraphQL** e o **MS2 (IA)** seja **servidor GraphQL** — ou seja, a comunicação MS1→MS2 especificamente (não a comunicação Gateway→MS1, que continua REST) tem que passar por GraphQL. Isso é pedido pra demonstrar, na prática, que o grupo sabe **consumir e expor** os dois lados do protocolo dentro de uma arquitetura de microserviços.
 
 ## Como implementamos
 
@@ -24,9 +24,22 @@ A descrição do trabalho exige que o **MS1 (coordenador)** seja **cliente Graph
 **Schema** (`ms2-ai-powered/src/main/resources/graphql/schema.graphqls`):
 ```graphql
 type Query {
-    perguntar(mensagem: String!, chatId: String): String
+    perguntar(mensagem: String!, chatId: String): RespostaIA!
+    historico(chatId: String!): [MensagemChat!]!
+}
+
+type RespostaIA {
+    mensagem: String!
+    chatId: String!
+}
+
+type MensagemChat {
+    papel: String!
+    conteudo: String!
 }
 ```
+
+De propósito **não** ficou só um campo escalar (`perguntar(...): String`) — isso deixaria o GraphQL sendo usado só como "transporte", sem nenhuma vantagem real sobre REST (a crítica óbvia seria "por que GraphQL, se é só uma String?"). Com `RespostaIA` como tipo objeto e a query `historico` adicional, o schema já tem: múltiplos tipos relacionados, uma lista aninhada (`[MensagemChat!]!`), e o cliente podendo escolher exatamente quais campos de cada tipo quer.
 
 **Resolver** (`PerguntaGraphQlController`):
 ```java
@@ -35,13 +48,20 @@ public class PerguntaGraphQlController {
     private final AiChatService aiChatService;
 
     @QueryMapping
-    public String perguntar(@Argument String mensagem, @Argument String chatId) {
-        return aiChatService.processarMensagem(chatId != null ? chatId : "chat-padrao", mensagem);
+    public RespostaIA perguntar(@Argument String mensagem, @Argument String chatId) {
+        String chatIdResolvido = chatId != null ? chatId : "chat-padrao";
+        String resposta = aiChatService.processarMensagem(chatIdResolvido, mensagem);
+        return new RespostaIA(resposta, chatIdResolvido);
+    }
+
+    @QueryMapping
+    public List<MensagemChat> historico(@Argument String chatId) {
+        return aiChatService.obterHistorico(chatId);
     }
 }
 ```
 
-O resolver **não contém lógica de IA nenhuma** — só repassa pro `AiChatService` que já existia (o mesmo que atende o endpoint REST `/ia/perguntar`). GraphQL aqui é uma **porta de entrada nova** pro mesmo serviço, não uma reimplementação.
+Nenhum dos dois resolvers contém lógica de IA — `perguntar` repassa pro `AiChatService` que já existia (o mesmo que atende o endpoint REST `/ia/perguntar`), e `historico` só expõe uma leitura da `ChatMemory` que o serviço já mantinha internamente (`chatMemory.get(chatId)`) mas que antes não tinha nenhum jeito de ser consultada de fora. GraphQL aqui é uma **porta de entrada nova** pro mesmo serviço, não uma reimplementação.
 
 A dependência `spring-boot-starter-graphql` faz o resto: lê o `.graphqls`, casa o `Query.perguntar` com o método `@QueryMapping`, e expõe tudo em `POST http://localhost:8082/graphql`, aceitando um corpo JSON `{"query": "..."}`.
 
@@ -52,7 +72,9 @@ A dependência `spring-boot-starter-graphql` faz o resto: lê o `.graphqls`, cas
 public class Ms2GraphQlClient {
     private static final String QUERY = """
             query Perguntar($mensagem: String!, $chatId: String) {
-                perguntar(mensagem: $mensagem, chatId: $chatId)
+                perguntar(mensagem: $mensagem, chatId: $chatId) {
+                    mensagem
+                }
             }
             """;
 
@@ -69,12 +91,14 @@ public class Ms2GraphQlClient {
         return graphQlClient.document(QUERY)
                 .variable("mensagem", mensagem)
                 .variable("chatId", chatId)
-                .retrieve("perguntar")
+                .retrieve("perguntar.mensagem")
                 .toEntity(String.class)
                 .block();
     }
 }
 ```
+
+O MS1 só usa o campo `mensagem` de `RespostaIA` (é só o que o `Ms2GraphQlClient.perguntar` precisa devolver pro `PerguntaController`) — `retrieve("perguntar.mensagem")` seleciona direto esse campo aninhado, sem precisar mapear o objeto inteiro pra um DTO no MS1. A query `historico` não tem client no MS1 hoje (é consumida direto no MS2 via GraphiQL/Postman pra fins de demonstração), mas poderia ganhar um a qualquer momento sem mudar o schema.
 
 Pontos importantes:
 
@@ -94,6 +118,20 @@ Cliente/Gateway --REST--> MS1 (/perguntar) --GraphQL--> MS2 (/graphql) --> AiCha
 
 Repare que o MS2, pra responder, pode voltar a chamar o MS1 — mas aí via **REST** (a tool `consultarNotas` usa `WebClient` comum), não GraphQL. O requisito de GraphQL é só na direção MS1→MS2.
 
-### Onde isso cresce depois (não implementado agora)
+### O ganho de ter dois tipos + duas queries, na prática
 
-Hoje o schema tem um campo só, então o "ganho" clássico do GraphQL (pedir só os campos que precisa, combinar dados de fontes diferentes numa query só) não aparece com força — ele aparece se, no futuro, alguém adicionar mais queries no MS2 (ex.: `explicarRegra(topico: String): String`, `resumoConversa(chatId: String): [String]`) sem precisar criar rotas novas nem versionar endpoints REST: o mesmo `/graphql` absorve tudo, e o cliente pede exatamente os campos que quer numa única ida.
+Como `perguntar` e `historico` retornam tipos objeto (`RespostaIA`, `[MensagemChat!]!`), dá pra combinar as duas numa **única** requisição GraphQL, cada uma pedindo só os campos que interessam:
+
+```graphql
+query {
+  perguntar(mensagem: "Qual a média para aprovação?", chatId: "prof-123") {
+    mensagem
+  }
+  historico(chatId: "prof-123") {
+    papel
+    conteudo
+  }
+}
+```
+
+Uma única ida ao `/graphql` traz a resposta nova **e** o histórico da conversa — em REST isso seriam duas chamadas a dois endpoints diferentes (`GET /ia/perguntar` + `GET /ia/historico/{chatId}`, que nem existe hoje). Isso que dá pra apontar se o professor perguntar "cadê a vantagem do GraphQL aqui": o cliente decide o que buscar e em que combinação, sem o servidor precisar prever cada combinação como um endpoint REST separado.

@@ -58,3 +58,6 @@ A arquitetura adota a abordagem *Polyrepo*, com um repositório dedicado à conf
 > Ver `docs/TRACKER.md` para o checklist detalhado do que já está pronto e o que falta.
 > Ver `docs/GRAPHQL.md` para como e por que o GraphQL é usado entre MS1 e MS2.
 > Ver `docs/TESTES-MANUAIS.md` para um roteiro de testes manuais serviço a serviço e de ponta a ponta.
+> Ver `docs/TESTES-CARGA.md` para o plano de teste de carga (JMeter) e como achar a Knee/Usable Capacity.
+> Ver `docs/APRESENTACAO.md` para explicação de módulos/ferramentas e respostas às perguntas do professor.
+> Ver `docs/ROTEIRO-APRESENTACAO.md` para o roteiro passo a passo do dia da apresentação (comandos exatos, o que esperar, o que derrubar).

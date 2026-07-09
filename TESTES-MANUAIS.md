@@ -106,29 +106,54 @@ curl -s "localhost:8082/ia/perguntar?mensagem=qual+a+frequ%C3%AAncia+m%C3%ADnima
 http://localhost:8082/graphiql (o navegador segue um redirect automático pra `?path=/graphql`, é normal) — cole no editor:
 ```graphql
 query {
-  perguntar(mensagem: "qual a frequência mínima para aprovação?", chatId: "navegador1")
+  perguntar(mensagem: "qual a frequência mínima para aprovação?", chatId: "navegador1") {
+    mensagem
+  }
 }
 ```
-Clique em "Run" (▶). Deve responder citando os 75%.
+Clique em "Run" (▶). Deve responder citando os 75%. Repare que `perguntar` retorna um **tipo objeto**
+(`RespostaIA { mensagem, chatId }`), não uma `String` solta — por isso precisa do `{ mensagem }` na
+query, selecionando o campo que você quer.
+
+**Combinando `perguntar` + `historico` numa única query** (a vantagem real do GraphQL sobre REST — uma
+ida só, cliente escolhe os campos):
+```graphql
+query {
+  perguntar(mensagem: "qual a nota mínima para aprovação direta?", chatId: "t2") {
+    mensagem
+  }
+  historico(chatId: "t2") {
+    papel
+    conteudo
+  }
+}
+```
 
 **GraphQL via curl:**
 ```bash
 curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
-  -d '{"query":"query { perguntar(mensagem: \"qual a nota mínima para aprovação direta?\", chatId: \"t2\") }"}'
-# deve responder "7,0" (ou "7.0")
+  -d '{"query":"query { perguntar(mensagem: \"qual a nota mínima para aprovação direta?\", chatId: \"t2\") { mensagem } }"}'
+# deve responder "7,0" (ou "7.0"), dentro de data.perguntar.mensagem
+```
+
+**Consultar o histórico da conversa** (query nova, expõe a `ChatMemory` que antes só existia internamente):
+```bash
+curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
+  -d '{"query":"query { historico(chatId: \"t2\") { papel conteudo } }"}'
+# deve listar as mensagens "user" e "assistant" da conversa "t2", na ordem
 ```
 
 **Tool `consultarNotas` (aciona chamada real ao MS1)**:
 ```bash
 curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
-  -d '{"query":"query { perguntar(mensagem: \"quais as notas do aluno de matrícula 20260001?\", chatId: \"t3\") }"}'
+  -d '{"query":"query { perguntar(mensagem: \"quais as notas do aluno de matrícula 20260001?\", chatId: \"t3\") { mensagem } }"}'
 # a resposta deve listar as notas reais que você cadastrou no passo 5 (prova de que bateu no Postgres via MS1)
 ```
 
 **MCP (dois clients: terceiro + próprio)**: confirme nos logs do `mvn spring-boot:run` duas linhas `Server response with Protocol ...`, uma com `Info: Implementation[name=mcp-fetch ...]` (terceiro, stdio) e outra com `Info: Implementation[name=mcp-server ...]` (o `mcp-server-academico`, SSE/HTTP). Teste que a IA realmente aciona a tool do MCP próprio (não só conecta):
 ```bash
 curl -s -X POST localhost:8082/graphql -H "Content-Type: application/json" \
-  -d '{"query":"query { perguntar(mensagem: \"explique detalhadamente o que significa a situação PENDENTE_VALIDACAO\", chatId: \"mcptest\") }"}'
+  -d '{"query":"query { perguntar(mensagem: \"explique detalhadamente o que significa a situação PENDENTE_VALIDACAO\", chatId: \"mcptest\") { mensagem } }"}'
 # a resposta deve mencionar "serviço de validação de notas (MS3) estava indisponível" -- esse texto só
 # existe na tool explicarSituacao do mcp-server-academico, não no RAG nem em nenhum outro lugar,
 # então essa resposta prova que o MCP próprio foi realmente invocado (não só conectado)

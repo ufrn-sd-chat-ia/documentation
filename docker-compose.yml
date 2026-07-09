@@ -24,6 +24,17 @@ services:
     image: openzipkin/zipkin:3
     container_name: boletim-zipkin
     restart: unless-stopped
+    # Sem isso, o heap padrão da imagem estoura rápido com sampling 100%
+    # (management.tracing.sampling.probability: 1.0) sob carga do JMeter --
+    # o container entrava em loop de crash (OutOfMemoryError) e qualquer
+    # serviço tentando mandar span recebia "connection prematurely closed"
+    # (não tem nada a ver com o fluxo sendo testado, é só o Zipkin reiniciando).
+    # MEM_MAX_SPANS limita quantos spans o storage em memória guarda (padrão
+    # da imagem é 500000, sem eviction agressiva) -- sem isso, mesmo com mais
+    # heap, uma sessão de testes de várias horas eventualmente enche de novo.
+    environment:
+      - JAVA_OPTS=-Xms256m -Xmx1536m
+      - MEM_MAX_SPANS=50000
     ports:
       - "9411:9411"
 
